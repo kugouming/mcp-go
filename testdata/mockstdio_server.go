@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log/slog"
+	"log"
 	"os"
 
 	"github.com/kugouming/mcp-go/mcp"
@@ -28,8 +28,8 @@ type JSONRPCResponse struct {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{}))
-	logger.Info("launch successful")
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+	logger.Println(`{"level":"INFO","msg":"launch successful"}`)
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		var request JSONRPCRequest

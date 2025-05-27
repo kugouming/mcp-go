@@ -87,7 +87,10 @@ func (s *sseSession) GetSessionTools() map[string]ServerTool {
 
 func (s *sseSession) SetSessionTools(tools map[string]ServerTool) {
 	// Clear existing tools
-	s.tools.Clear()
+	s.tools.Range(func(key, value any) bool {
+		s.tools.Delete(key)
+		return true
+	})
 
 	// Set new tools
 	for name, tool := range tools {
@@ -496,7 +499,13 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Create a context that preserves all values from parent ctx but won't be canceled when the parent is canceled.
 	// this is required because the http ctx will be canceled when the client disconnects
-	detachedCtx := context.WithoutCancel(ctx)
+	detachedCtx := context.Background()
+	// Preserve the server context value which is needed for message handling
+	if server := ServerFromContext(ctx); server != nil {
+		detachedCtx = context.WithValue(detachedCtx, serverKey{}, server)
+	}
+	// Preserve the session context value
+	detachedCtx = s.server.WithContext(detachedCtx, session)
 
 	// quick return request, send 202 Accepted with no body, then deal the message and sent response via SSE
 	w.WriteHeader(http.StatusAccepted)
@@ -644,16 +653,39 @@ func (s *SSEServer) CompleteMessagePath() string {
 //
 // Example usage:
 //
-//	// Advanced/dynamic:
+//	// Advanced/dynamic (Go 1.22+ with PathValue):
 //	sseServer := NewSSEServer(mcpServer,
 //		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := r.PathValue("tenant")
+//			tenant := r.PathValue("tenant") // Go 1.22+ only
 //			return "/mcp/" + tenant
 //		}),
 //		WithBaseURL("http://localhost:8080")
 //	)
 //	mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
 //	mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
+//
+//	// For Go < 1.22, use manual path parsing:
+//	extractTenant := func(path string) string {
+//		parts := strings.Split(strings.Trim(path, "/"), "/")
+//		if len(parts) >= 2 && parts[0] == "mcp" {
+//			return parts[1]
+//		}
+//		return ""
+//	}
+//	sseServer := NewSSEServer(mcpServer,
+//		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
+//			tenant := extractTenant(r.URL.Path)
+//			return "/mcp/" + tenant
+//		}),
+//		WithBaseURL("http://localhost:8080")
+//	)
+//	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
+//		if strings.HasSuffix(r.URL.Path, "/sse") {
+//			sseServer.SSEHandler().ServeHTTP(w, r)
+//		} else if strings.HasSuffix(r.URL.Path, "/message") {
+//			sseServer.MessageHandler().ServeHTTP(w, r)
+//		}
+//	})
 //
 // For non-dynamic cases, use ServeHTTP method instead.
 func (s *SSEServer) SSEHandler() http.Handler {
@@ -673,16 +705,39 @@ func (s *SSEServer) SSEHandler() http.Handler {
 //
 // Example usage:
 //
-//	// Advanced/dynamic:
+//	// Advanced/dynamic (Go 1.22+ with PathValue):
 //	sseServer := NewSSEServer(mcpServer,
 //		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := r.PathValue("tenant")
+//			tenant := r.PathValue("tenant") // Go 1.22+ only
 //			return "/mcp/" + tenant
 //		}),
 //		WithBaseURL("http://localhost:8080")
 //	)
 //	mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
 //	mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
+//
+//	// For Go < 1.22, use manual path parsing:
+//	extractTenant := func(path string) string {
+//		parts := strings.Split(strings.Trim(path, "/"), "/")
+//		if len(parts) >= 2 && parts[0] == "mcp" {
+//			return parts[1]
+//		}
+//		return ""
+//	}
+//	sseServer := NewSSEServer(mcpServer,
+//		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
+//			tenant := extractTenant(r.URL.Path)
+//			return "/mcp/" + tenant
+//		}),
+//		WithBaseURL("http://localhost:8080")
+//	)
+//	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
+//		if strings.HasSuffix(r.URL.Path, "/sse") {
+//			sseServer.SSEHandler().ServeHTTP(w, r)
+//		} else if strings.HasSuffix(r.URL.Path, "/message") {
+//			sseServer.MessageHandler().ServeHTTP(w, r)
+//		}
+//	})
 //
 // For non-dynamic cases, use ServeHTTP method instead.
 func (s *SSEServer) MessageHandler() http.Handler {

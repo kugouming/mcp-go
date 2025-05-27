@@ -1758,7 +1758,7 @@ func TestMCPServer_SessionHooks(t *testing.T) {
 		initialized:         false,
 	}
 
-	ctx := context.WithoutCancel(context.Background())
+	ctx := context.Background()
 	err := server.RegisterSession(ctx, testSession)
 	require.NoError(t, err)
 
@@ -1785,7 +1785,7 @@ func TestMCPServer_SessionHooks_NilHooks(t *testing.T) {
 		initialized:         false,
 	}
 
-	ctx := context.WithoutCancel(context.Background())
+	ctx := context.Background()
 	err := server.RegisterSession(ctx, testSession)
 	require.NoError(t, err)
 

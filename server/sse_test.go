@@ -883,19 +883,37 @@ func TestSSEServer(t *testing.T) {
 
 	t.Run("TestSSEHandlerWithDynamicMounting", func(t *testing.T) {
 		mcpServer := NewMCPServer("test", "1.0.0")
-		// MessageEndpointFunc that extracts tenant from the path using Go 1.22+ PathValue
+		// MessageEndpointFunc that extracts tenant from the path (compatible with Go 1.20+)
+
+		// extractTenantFromPath extracts tenant from path like "/mcp/{tenant}/sse" or "/mcp/{tenant}/message"
+		extractTenantFromPath := func(path string) string {
+			// Expected path format: /mcp/{tenant}/sse or /mcp/{tenant}/message
+			parts := strings.Split(strings.Trim(path, "/"), "/")
+			if len(parts) >= 2 && parts[0] == "mcp" {
+				return parts[1]
+			}
+			return ""
+		}
 
 		sseServer := NewSSEServer(
 			mcpServer,
 			WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-				tenant := r.PathValue("tenant")
+				tenant := extractTenantFromPath(r.URL.Path)
 				return "/mcp/" + tenant
 			}),
 		)
 
 		mux := http.NewServeMux()
-		mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
-		mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
+		// Note: For Go < 1.22, we need to handle path patterns manually
+		mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/sse") {
+				sseServer.SSEHandler().ServeHTTP(w, r)
+			} else if strings.HasSuffix(r.URL.Path, "/message") {
+				sseServer.MessageHandler().ServeHTTP(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+		})
 
 		ts := httptest.NewServer(mux)
 		defer ts.Close()

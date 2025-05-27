@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -296,9 +295,9 @@ func TestStdioMCPClient(t *testing.T) {
 			return
 		}
 
-		msg, ok := logRecords[0][slog.MessageKey].(string)
+		msg, ok := logRecords[0]["msg"].(string)
 		if !ok {
-			t.Errorf("Expected log record to have message key")
+			t.Errorf("Expected log record to have msg key")
 		}
 		if msg != "launch successful" {
 			t.Errorf("Expected log message 'launch successful', got '%s'", msg)
