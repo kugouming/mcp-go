@@ -211,7 +211,7 @@ func TestMCPServer_Tools(t *testing.T) {
 		{
 			name: "SetTools sends single notifications/tools/list_changed per each active session",
 			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
-				for i := range 5 {
+				for i := 0; i < 5; i++ {
 					err := server.RegisterSession(context.TODO(), &fakeSession{
 						sessionID:           fmt.Sprintf("test%d", i),
 						notificationChannel: notificationChannel,
@@ -220,7 +220,7 @@ func TestMCPServer_Tools(t *testing.T) {
 					require.NoError(t, err)
 				}
 				// also let's register inactive sessions
-				for i := range 5 {
+				for i := 0; i < 5; i++ {
 					err := server.RegisterSession(context.TODO(), &fakeSession{
 						sessionID:           fmt.Sprintf("test%d", i+5),
 						notificationChannel: notificationChannel,
@@ -564,12 +564,12 @@ func TestMCPServer_SendNotificationToClient(t *testing.T) {
 				})
 			},
 			validate: func(t *testing.T, ctx context.Context, srv *MCPServer) {
-				for range 10 {
+				for i := 0; i < 10; i++ {
 					require.NoError(t, srv.SendNotificationToClient(ctx, "method", nil))
 				}
 				session, ok := ClientSessionFromContext(ctx).(fakeSession)
 				require.True(t, ok, "session not found or of incorrect type")
-				for range 10 {
+				for i := 0; i < 10; i++ {
 					select {
 					case record := <-session.notificationChannel:
 						assert.Equal(t, "method", record.Method)
@@ -613,7 +613,7 @@ func TestMCPServer_SendNotificationToAllClients(t *testing.T) {
 
 	contextPrepare := func(ctx context.Context, srv *MCPServer) context.Context {
 		// Create 5 active sessions
-		for i := range 5 {
+		for i := 0; i < 5; i++ {
 			err := srv.RegisterSession(ctx, &fakeSession{
 				sessionID:           fmt.Sprintf("test%d", i),
 				notificationChannel: make(chan mcp.JSONRPCNotification, 10),
@@ -626,7 +626,7 @@ func TestMCPServer_SendNotificationToAllClients(t *testing.T) {
 
 	validate := func(t *testing.T, _ context.Context, srv *MCPServer) {
 		// Send 10 notifications to all sessions
-		for i := range 10 {
+		for i := 0; i < 10; i++ {
 			srv.SendNotificationToAllClients("method", map[string]any{
 				"count": i,
 			})
@@ -1831,7 +1831,7 @@ func TestMCPServer_WithRecover(t *testing.T) {
 
 func getTools(length int) []mcp.Tool {
 	list := make([]mcp.Tool, 0, 10000)
-	for i := range length {
+	for i := 0; i < length; i++ {
 		list = append(list, mcp.Tool{
 			Name:        fmt.Sprintf("tool%d", i),
 			Description: fmt.Sprintf("tool%d", i),
