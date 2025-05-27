@@ -5,7 +5,6 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strconv"
 
 	"github.com/yosida95/uritemplate/v3"
@@ -128,7 +127,10 @@ func (m *Meta) MarshalJSON() ([]byte, error) {
 	if m.ProgressToken != nil {
 		raw["progressToken"] = m.ProgressToken
 	}
-	maps.Copy(raw, m.AdditionalFields)
+	// 手动复制 map 以兼容 Go 1.18
+	for k, v := range m.AdditionalFields {
+		raw[k] = v
+	}
 
 	return json.Marshal(raw)
 }
