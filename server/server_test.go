@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestMCPServer_Capabilities(t *testing.T) {
 
 				assert.Equal(
 					t,
-					mcp.LATEST_PROTOCOL_VERSION,
+					"2025-03-26", // Backward compatibility: no protocol version provided,
 					initResult.ProtocolVersion,
 				)
 				assert.Equal(t, "test-server", initResult.ServerInfo.Name)
@@ -69,7 +70,7 @@ func TestMCPServer_Capabilities(t *testing.T) {
 
 				assert.Equal(
 					t,
-					mcp.LATEST_PROTOCOL_VERSION,
+					"2025-03-26", // Backward compatibility: no protocol version provided,
 					initResult.ProtocolVersion,
 				)
 				assert.Equal(t, "test-server", initResult.ServerInfo.Name)
@@ -106,7 +107,7 @@ func TestMCPServer_Capabilities(t *testing.T) {
 
 				assert.Equal(
 					t,
-					mcp.LATEST_PROTOCOL_VERSION,
+					"2025-03-26", // Backward compatibility: no protocol version provided,
 					initResult.ProtocolVersion,
 				)
 				assert.Equal(t, "test-server", initResult.ServerInfo.Name)
@@ -406,7 +407,7 @@ func TestMCPServer_HandleValidMessages(t *testing.T) {
 
 				assert.Equal(
 					t,
-					mcp.LATEST_PROTOCOL_VERSION,
+					"2025-03-26", // Backward compatibility: no protocol version provided,
 					initResult.ProtocolVersion,
 				)
 				assert.Equal(t, "test-server", initResult.ServerInfo.Name)
@@ -962,6 +963,50 @@ func TestMCPServer_Prompts(t *testing.T) {
 				assert.Equal(t, "test-prompt-2", prompts[1].Name)
 			},
 		},
+		{
+			name: "SetPrompts sends single notifications/prompts/list_changed with one active session",
+			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
+				err := server.RegisterSession(context.TODO(), &fakeSession{
+					sessionID:           "test",
+					notificationChannel: notificationChannel,
+					initialized:         true,
+				})
+				require.NoError(t, err)
+				server.SetPrompts(ServerPrompt{
+					Prompt: mcp.Prompt{
+						Name:        "test-prompt-1",
+						Description: "A test prompt",
+						Arguments: []mcp.PromptArgument{
+							{
+								Name:        "arg1",
+								Description: "First argument",
+							},
+						},
+					},
+					Handler: nil,
+				}, ServerPrompt{
+					Prompt: mcp.Prompt{
+						Name:        "test-prompt-2",
+						Description: "Another test prompt",
+						Arguments: []mcp.PromptArgument{
+							{
+								Name:        "arg2",
+								Description: "Second argument",
+							},
+						},
+					},
+					Handler: nil,
+				})
+			},
+			expectedNotifications: 1,
+			validate: func(t *testing.T, notifications []mcp.JSONRPCNotification, promptsList mcp.JSONRPCMessage) {
+				assert.Equal(t, mcp.MethodNotificationPromptsListChanged, notifications[0].Method)
+				prompts := promptsList.(mcp.JSONRPCResponse).Result.(mcp.ListPromptsResult).Prompts
+				assert.Len(t, prompts, 2)
+				assert.Equal(t, "test-prompt-1", prompts[0].Name)
+				assert.Equal(t, "test-prompt-2", prompts[1].Name)
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -993,6 +1038,211 @@ func TestMCPServer_Prompts(t *testing.T) {
 				"method": "prompts/list"
 			}`))
 			tt.validate(t, notifications, promptsList)
+		})
+	}
+}
+
+func TestMCPServer_Resources(t *testing.T) {
+	tests := []struct {
+		name                  string
+		action                func(*testing.T, *MCPServer, chan mcp.JSONRPCNotification)
+		expectedNotifications int
+		validate              func(*testing.T, []mcp.JSONRPCNotification, mcp.JSONRPCMessage)
+	}{
+		{
+			name: "DeleteResources sends single notifications/resources/list_changed",
+			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
+				err := server.RegisterSession(context.TODO(), &fakeSession{
+					sessionID:           "test",
+					notificationChannel: notificationChannel,
+					initialized:         true,
+				})
+				require.NoError(t, err)
+				server.AddResource(
+					mcp.Resource{
+						URI:  "test://test-resource-1",
+						Name: "Test Resource 1",
+					},
+					func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				)
+				server.DeleteResources("test://test-resource-1")
+			},
+			expectedNotifications: 2,
+			validate: func(t *testing.T, notifications []mcp.JSONRPCNotification, resourcesList mcp.JSONRPCMessage) {
+				// One for AddResource
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[0].Method)
+				// One for DeleteResources
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[1].Method)
+
+				// Expect a successful response with an empty list of resources
+				resp, ok := resourcesList.(mcp.JSONRPCResponse)
+				assert.True(t, ok, "Expected JSONRPCResponse, got %T", resourcesList)
+
+				result, ok := resp.Result.(mcp.ListResourcesResult)
+				assert.True(t, ok, "Expected ListResourcesResult, got %T", resp.Result)
+
+				assert.Empty(t, result.Resources, "Expected empty resources list")
+			},
+		},
+		{
+			name: "DeleteResources removes the first resource and retains the other",
+			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
+				err := server.RegisterSession(context.TODO(), &fakeSession{
+					sessionID:           "test",
+					notificationChannel: notificationChannel,
+					initialized:         true,
+				})
+				require.NoError(t, err)
+				server.AddResource(
+					mcp.Resource{
+						URI:  "test://test-resource-1",
+						Name: "Test Resource 1",
+					},
+					func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				)
+				server.AddResource(
+					mcp.Resource{
+						URI:  "test://test-resource-2",
+						Name: "Test Resource 2",
+					},
+					func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				)
+				server.DeleteResources("test://test-resource-1")
+			},
+			expectedNotifications: 3,
+			validate: func(t *testing.T, notifications []mcp.JSONRPCNotification, resourcesList mcp.JSONRPCMessage) {
+				// first notification expected for AddResource test-resource-1
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[0].Method)
+				// second notification expected for AddResource test-resource-2
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[1].Method)
+				// third notification expected for DeleteResources test-resource-1
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[2].Method)
+
+				// Confirm the resource list contains only test-resource-2
+				resources := resourcesList.(mcp.JSONRPCResponse).Result.(mcp.ListResourcesResult).Resources
+				assert.Len(t, resources, 1)
+				assert.Equal(t, "test://test-resource-2", resources[0].URI)
+			},
+		},
+		{
+			name: "DeleteResources with non-existent resources does nothing and not receives notifications from MCPServer",
+			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
+				err := server.RegisterSession(context.TODO(), &fakeSession{
+					sessionID:           "test",
+					notificationChannel: notificationChannel,
+					initialized:         true,
+				})
+				require.NoError(t, err)
+				server.AddResource(
+					mcp.Resource{
+						URI:  "test://test-resource-1",
+						Name: "Test Resource 1",
+					},
+					func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				)
+				server.AddResource(
+					mcp.Resource{
+						URI:  "test://test-resource-2",
+						Name: "Test Resource 2",
+					},
+					func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				)
+				// Remove non-existing resources
+				server.DeleteResources("test://test-resource-3", "test://test-resource-4")
+			},
+			expectedNotifications: 2,
+			validate: func(t *testing.T, notifications []mcp.JSONRPCNotification, resourcesList mcp.JSONRPCMessage) {
+				// first notification expected for AddResource test-resource-1
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[0].Method)
+				// second notification expected for AddResource test-resource-2
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[1].Method)
+
+				// Confirm the resource list does not change
+				resources := resourcesList.(mcp.JSONRPCResponse).Result.(mcp.ListResourcesResult).Resources
+				assert.Len(t, resources, 2)
+				// Resources are sorted by name
+				assert.Equal(t, "test://test-resource-1", resources[0].URI)
+				assert.Equal(t, "test://test-resource-2", resources[1].URI)
+			},
+		},
+		{
+			name: "SetResources sends single notifications/resources/list_changed with one active session",
+			action: func(t *testing.T, server *MCPServer, notificationChannel chan mcp.JSONRPCNotification) {
+				err := server.RegisterSession(context.TODO(), &fakeSession{
+					sessionID:           "test",
+					notificationChannel: notificationChannel,
+					initialized:         true,
+				})
+				require.NoError(t, err)
+				server.SetResources(ServerResource{
+					Resource: mcp.Resource{
+						URI:  "test://test-resource-1",
+						Name: "Test Resource 1",
+					},
+					Handler: func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				}, ServerResource{
+					Resource: mcp.Resource{
+						URI:  "test://test-resource-2",
+						Name: "Test Resource 2",
+					},
+					Handler: func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+						return []mcp.ResourceContents{}, nil
+					},
+				})
+			},
+			expectedNotifications: 1,
+			validate: func(t *testing.T, notifications []mcp.JSONRPCNotification, resourcesList mcp.JSONRPCMessage) {
+				assert.Equal(t, mcp.MethodNotificationResourcesListChanged, notifications[0].Method)
+				resources := resourcesList.(mcp.JSONRPCResponse).Result.(mcp.ListResourcesResult).Resources
+				assert.Len(t, resources, 2)
+				// Resources are sorted by name
+				assert.Equal(t, "test://test-resource-1", resources[0].URI)
+				assert.Equal(t, "test://test-resource-2", resources[1].URI)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			server := NewMCPServer("test-server", "1.0.0", WithResourceCapabilities(true, true))
+			_ = server.HandleMessage(ctx, []byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "initialize"
+			}`))
+			notificationChannel := make(chan mcp.JSONRPCNotification, 100)
+			notifications := make([]mcp.JSONRPCNotification, 0)
+			tt.action(t, server, notificationChannel)
+			for done := false; !done; {
+				select {
+				case serverNotification := <-notificationChannel:
+					notifications = append(notifications, serverNotification)
+					if len(notifications) == tt.expectedNotifications {
+						done = true
+					}
+				case <-time.After(1 * time.Second):
+					done = true
+				}
+			}
+			assert.Len(t, notifications, tt.expectedNotifications)
+			resourcesList := server.HandleMessage(ctx, []byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "resources/list"
+			}`))
+			tt.validate(t, notifications, resourcesList)
 		})
 	}
 }
@@ -1455,6 +1705,54 @@ func TestMCPServer_ResourceTemplates(t *testing.T) {
 		assert.Equal(t, "test://something/test-resource/a/b/c", resultContent.URI)
 		assert.Equal(t, "text/plain", resultContent.MIMEType)
 		assert.Equal(t, "test content: something", resultContent.Text)
+	})
+
+	server.AddResourceTemplates(
+		ServerResourceTemplate{
+			Template: mcp.NewResourceTemplate(
+				"test://test-another-resource-1",
+				"Another Resource 1",
+			),
+			Handler: func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+				return []mcp.ResourceContents{}, nil
+			},
+		},
+		ServerResourceTemplate{
+			Template: mcp.NewResourceTemplate(
+				"test://test-another-resource-2",
+				"Another Resource 2",
+			),
+			Handler: func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+				return []mcp.ResourceContents{}, nil
+			},
+		},
+	)
+
+	t.Run("Check bulk add resource templates", func(t *testing.T) {
+		assert.Equal(t, 3, len(server.resourceTemplates))
+	})
+
+	t.Run("Get resource template again", func(t *testing.T) {
+		response := server.HandleMessage(
+			context.Background(),
+			[]byte(listMessage),
+		)
+		assert.NotNil(t, response)
+
+		resp, ok := response.(mcp.JSONRPCResponse)
+		assert.True(t, ok)
+		listResult, ok := resp.Result.(mcp.ListResourceTemplatesResult)
+		assert.True(t, ok)
+		assert.Len(t, listResult.ResourceTemplates, 3)
+
+		// resource templates are stored in a map, so the order is not guaranteed
+		for _, rt := range listResult.ResourceTemplates {
+			assert.True(t, slices.Contains([]string{
+				"My Resource",
+				"Another Resource 1",
+				"Another Resource 2",
+			}, rt.Name))
+		}
 	})
 }
 
@@ -1943,6 +2241,82 @@ func TestMCPServer_ToolCapabilitiesBehavior(t *testing.T) {
 			server := NewMCPServer("test-server", "1.0.0", tt.serverOptions...)
 			server.AddTool(mcp.NewTool("test-tool"), nil)
 			tt.validateServer(t, server)
+		})
+	}
+}
+
+func TestMCPServer_ProtocolNegotiation(t *testing.T) {
+	tests := []struct {
+		name            string
+		clientVersion   string
+		expectedVersion string
+	}{
+		{
+			name:            "Server supports client version - should respond with same version",
+			clientVersion:   "2024-11-05",
+			expectedVersion: "2024-11-05", // Server must respond with client's version if supported
+		},
+		{
+			name:            "Client requests current latest - should respond with same version",
+			clientVersion:   mcp.LATEST_PROTOCOL_VERSION, // "2025-03-26"
+			expectedVersion: mcp.LATEST_PROTOCOL_VERSION,
+		},
+		{
+			name:            "Client requests unsupported future version - should respond with server's latest",
+			clientVersion:   "2026-01-01",                // Future unsupported version
+			expectedVersion: mcp.LATEST_PROTOCOL_VERSION, // Server responds with its latest supported
+		},
+		{
+			name:            "Client requests unsupported old version - should respond with server's latest",
+			clientVersion:   "2023-01-01",                // Very old unsupported version
+			expectedVersion: mcp.LATEST_PROTOCOL_VERSION, // Server responds with its latest supported
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewMCPServer("test-server", "1.0.0")
+
+			params := struct {
+				ProtocolVersion string                 `json:"protocolVersion"`
+				ClientInfo      mcp.Implementation     `json:"clientInfo"`
+				Capabilities    mcp.ClientCapabilities `json:"capabilities"`
+			}{
+				ProtocolVersion: tt.clientVersion,
+				ClientInfo: mcp.Implementation{
+					Name:    "test-client",
+					Version: "1.0.0",
+				},
+			}
+
+			// Create initialize request with specific protocol version
+			initRequest := mcp.JSONRPCRequest{
+				JSONRPC: "2.0",
+				ID:      mcp.NewRequestId(int64(1)),
+				Request: mcp.Request{
+					Method: "initialize",
+				},
+				Params: params,
+			}
+
+			messageBytes, err := json.Marshal(initRequest)
+			assert.NoError(t, err)
+
+			response := server.HandleMessage(context.Background(), messageBytes)
+			assert.NotNil(t, response)
+
+			resp, ok := response.(mcp.JSONRPCResponse)
+			assert.True(t, ok)
+
+			initResult, ok := resp.Result.(mcp.InitializeResult)
+			assert.True(t, ok)
+
+			assert.Equal(
+				t,
+				tt.expectedVersion,
+				initResult.ProtocolVersion,
+				"Protocol version should follow MCP spec negotiation rules",
+			)
 		})
 	}
 }

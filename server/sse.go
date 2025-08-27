@@ -30,6 +30,7 @@ type sseSession struct {
 	loggingLevel        atomic.Value
 	tools               sync.Map     // stores session-specific tools
 	clientInfo          atomic.Value // stores session-specific client info
+	clientCapabilities  atomic.Value // stores session-specific client capabilities
 }
 
 // SSEContextFunc is a function that takes an existing context and the current
@@ -109,6 +110,19 @@ func (s *sseSession) GetClientInfo() mcp.Implementation {
 
 func (s *sseSession) SetClientInfo(clientInfo mcp.Implementation) {
 	s.clientInfo.Store(clientInfo)
+}
+
+func (s *sseSession) SetClientCapabilities(clientCapabilities mcp.ClientCapabilities) {
+	s.clientCapabilities.Store(clientCapabilities)
+}
+
+func (s *sseSession) GetClientCapabilities() mcp.ClientCapabilities {
+	if value := s.clientCapabilities.Load(); value != nil {
+		if clientCapabilities, ok := value.(mcp.ClientCapabilities); ok {
+			return clientCapabilities
+		}
+	}
+	return mcp.ClientCapabilities{}
 }
 
 var (
@@ -230,7 +244,9 @@ func WithSSEEndpoint(endpoint string) SSEOption {
 	}
 }
 
-// WithHTTPServer sets the HTTP server instance
+// WithHTTPServer sets the HTTP server instance.
+// NOTE: When providing a custom HTTP server, you must handle routing yourself
+// If routing is not set up, the server will start but won't handle any MCP requests.
 func WithHTTPServer(srv *http.Server) SSEOption {
 	return func(s *SSEServer) {
 		s.srv = srv
@@ -511,7 +527,8 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 
 	// Create a new context for handling the message that will be canceled when the message handling is done
-	messageCtx, cancel := context.WithCancel(detachedCtx)
+	messageCtx := context.WithValue(detachedCtx, requestHeader, r.Header)
+	messageCtx, cancel := context.WithCancel(messageCtx)
 
 	go func(ctx context.Context) {
 		defer cancel()
@@ -653,39 +670,16 @@ func (s *SSEServer) CompleteMessagePath() string {
 //
 // Example usage:
 //
-//	// Advanced/dynamic (Go 1.22+ with PathValue):
+//	// Advanced/dynamic:
 //	sseServer := NewSSEServer(mcpServer,
 //		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := r.PathValue("tenant") // Go 1.22+ only
+//			tenant := r.PathValue("tenant")
 //			return "/mcp/" + tenant
 //		}),
 //		WithBaseURL("http://localhost:8080")
 //	)
 //	mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
 //	mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
-//
-//	// For Go < 1.22, use manual path parsing:
-//	extractTenant := func(path string) string {
-//		parts := strings.Split(strings.Trim(path, "/"), "/")
-//		if len(parts) >= 2 && parts[0] == "mcp" {
-//			return parts[1]
-//		}
-//		return ""
-//	}
-//	sseServer := NewSSEServer(mcpServer,
-//		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := extractTenant(r.URL.Path)
-//			return "/mcp/" + tenant
-//		}),
-//		WithBaseURL("http://localhost:8080")
-//	)
-//	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-//		if strings.HasSuffix(r.URL.Path, "/sse") {
-//			sseServer.SSEHandler().ServeHTTP(w, r)
-//		} else if strings.HasSuffix(r.URL.Path, "/message") {
-//			sseServer.MessageHandler().ServeHTTP(w, r)
-//		}
-//	})
 //
 // For non-dynamic cases, use ServeHTTP method instead.
 func (s *SSEServer) SSEHandler() http.Handler {
@@ -705,39 +699,16 @@ func (s *SSEServer) SSEHandler() http.Handler {
 //
 // Example usage:
 //
-//	// Advanced/dynamic (Go 1.22+ with PathValue):
+//	// Advanced/dynamic:
 //	sseServer := NewSSEServer(mcpServer,
 //		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := r.PathValue("tenant") // Go 1.22+ only
+//			tenant := r.PathValue("tenant")
 //			return "/mcp/" + tenant
 //		}),
 //		WithBaseURL("http://localhost:8080")
 //	)
 //	mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
 //	mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
-//
-//	// For Go < 1.22, use manual path parsing:
-//	extractTenant := func(path string) string {
-//		parts := strings.Split(strings.Trim(path, "/"), "/")
-//		if len(parts) >= 2 && parts[0] == "mcp" {
-//			return parts[1]
-//		}
-//		return ""
-//	}
-//	sseServer := NewSSEServer(mcpServer,
-//		WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-//			tenant := extractTenant(r.URL.Path)
-//			return "/mcp/" + tenant
-//		}),
-//		WithBaseURL("http://localhost:8080")
-//	)
-//	mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-//		if strings.HasSuffix(r.URL.Path, "/sse") {
-//			sseServer.SSEHandler().ServeHTTP(w, r)
-//		} else if strings.HasSuffix(r.URL.Path, "/message") {
-//			sseServer.MessageHandler().ServeHTTP(w, r)
-//		}
-//	})
 //
 // For non-dynamic cases, use ServeHTTP method instead.
 func (s *SSEServer) MessageHandler() http.Handler {

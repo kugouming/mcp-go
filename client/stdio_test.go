@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
@@ -11,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
+	"github.com/kugouming/mcp-go/client/transport"
 	"github.com/kugouming/mcp-go/mcp"
 )
 
@@ -89,7 +93,7 @@ func TestStdioMCPClient(t *testing.T) {
 		defer cancel()
 
 		request := mcp.InitializeRequest{}
-		request.Params.ProtocolVersion = "1.0"
+		request.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 		request.Params.ClientInfo = mcp.Implementation{
 			Name:    "test-client",
 			Version: "1.0.0",
@@ -295,12 +299,52 @@ func TestStdioMCPClient(t *testing.T) {
 			return
 		}
 
-		msg, ok := logRecords[0]["msg"].(string)
+		msg, ok := logRecords[0][slog.MessageKey].(string)
 		if !ok {
-			t.Errorf("Expected log record to have msg key")
+			t.Errorf("Expected log record to have message key")
 		}
 		if msg != "launch successful" {
 			t.Errorf("Expected log message 'launch successful', got '%s'", msg)
 		}
 	})
+}
+
+func TestStdio_NewStdioMCPClientWithOptions_CreatesAndStartsClient(t *testing.T) {
+	called := false
+
+	fakeCmdFunc := func(ctx context.Context, command string, args []string, env []string) (*exec.Cmd, error) {
+		called = true
+		return exec.CommandContext(ctx, "echo", "started"), nil
+	}
+
+	client, err := NewStdioMCPClientWithOptions(
+		"echo",
+		[]string{"FOO=bar"},
+		[]string{"hello"},
+		transport.WithCommandFunc(fakeCmdFunc),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, client)
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	require.True(t, called)
+}
+
+func TestStdio_NewStdioMCPClientWithOptions_FailsToStart(t *testing.T) {
+	// Create a commandFunc that points to a nonexistent binary
+	badCmdFunc := func(ctx context.Context, command string, args []string, env []string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "/nonexistent/bar", args...), nil
+	}
+
+	client, err := NewStdioMCPClientWithOptions(
+		"foo",
+		nil,
+		nil,
+		transport.WithCommandFunc(badCmdFunc),
+	)
+
+	require.Error(t, err)
+	require.EqualError(t, err, "failed to start stdio transport: failed to start command: fork/exec /nonexistent/bar: no such file or directory")
+	require.Nil(t, client)
 }
