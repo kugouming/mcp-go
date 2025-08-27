@@ -35,7 +35,7 @@ func main() {
 		return mcp.NewToolResultText(fmt.Sprintf("Echo: %v", req.GetArguments()["message"])), nil
 	})
 
-	// Use a dynamic base path based on a path parameter (compatible with Go 1.20+)
+	// Use a dynamic base path based on a path parameter (Go 1.22+)
 	sseServer := server.NewSSEServer(
 		mcpServer,
 		server.WithDynamicBasePath(func(r *http.Request, sessionID string) string {

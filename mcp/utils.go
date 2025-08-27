@@ -198,7 +198,7 @@ func NewPromptMessage(role Role, content Content) PromptMessage {
 // Helper function to create a new TextContent
 func NewTextContent(text string) TextContent {
 	return TextContent{
-		Type: "text",
+		Type: ContentTypeText,
 		Text: text,
 	}
 }
@@ -207,7 +207,7 @@ func NewTextContent(text string) TextContent {
 // Helper function to create a new ImageContent
 func NewImageContent(data, mimeType string) ImageContent {
 	return ImageContent{
-		Type:     "image",
+		Type:     ContentTypeImage,
 		Data:     data,
 		MIMEType: mimeType,
 	}
@@ -216,16 +216,27 @@ func NewImageContent(data, mimeType string) ImageContent {
 // Helper function to create a new AudioContent
 func NewAudioContent(data, mimeType string) AudioContent {
 	return AudioContent{
-		Type:     "audio",
+		Type:     ContentTypeAudio,
 		Data:     data,
 		MIMEType: mimeType,
+	}
+}
+
+// Helper function to create a new ResourceLink
+func NewResourceLink(uri, name, description, mimeType string) ResourceLink {
+	return ResourceLink{
+		Type:        ContentTypeLink,
+		URI:         uri,
+		Name:        name,
+		Description: description,
+		MIMEType:    mimeType,
 	}
 }
 
 // Helper function to create a new EmbeddedResource
 func NewEmbeddedResource(resource ResourceContents) EmbeddedResource {
 	return EmbeddedResource{
-		Type:     "resource",
+		Type:     ContentTypeResource,
 		Resource: resource,
 	}
 }
@@ -235,10 +246,48 @@ func NewToolResultText(text string) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
 			},
 		},
+	}
+}
+
+// NewToolResultStructured creates a new CallToolResult with structured content.
+// It includes both the structured content and a text representation for backward compatibility.
+func NewToolResultStructured(structured any, fallbackText string) *CallToolResult {
+	return &CallToolResult{
+		Content: []Content{
+			TextContent{
+				Type: "text",
+				Text: fallbackText,
+			},
+		},
+		StructuredContent: structured,
+	}
+}
+
+// NewToolResultStructuredOnly creates a new CallToolResult with structured
+// content and creates a JSON string fallback for backwards compatibility.
+// This is useful when you want to provide structured data without any specific text fallback.
+func NewToolResultStructuredOnly(structured any) *CallToolResult {
+	var fallbackText string
+	// Convert to JSON string for backward compatibility
+	jsonBytes, err := json.Marshal(structured)
+	if err != nil {
+		fallbackText = fmt.Sprintf("Error serializing structured content: %v", err)
+	} else {
+		fallbackText = string(jsonBytes)
+	}
+
+	return &CallToolResult{
+		Content: []Content{
+			TextContent{
+				Type: "text",
+				Text: fallbackText,
+			},
+		},
+		StructuredContent: structured,
 	}
 }
 
@@ -247,11 +296,11 @@ func NewToolResultImage(text, imageData, mimeType string) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
 			},
 			ImageContent{
-				Type:     "image",
+				Type:     ContentTypeImage,
 				Data:     imageData,
 				MIMEType: mimeType,
 			},
@@ -264,11 +313,11 @@ func NewToolResultAudio(text, imageData, mimeType string) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
 			},
 			AudioContent{
-				Type:     "audio",
+				Type:     ContentTypeAudio,
 				Data:     imageData,
 				MIMEType: mimeType,
 			},
@@ -284,11 +333,11 @@ func NewToolResultResource(
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
 			},
 			EmbeddedResource{
-				Type:     "resource",
+				Type:     ContentTypeResource,
 				Resource: resource,
 			},
 		},
@@ -301,7 +350,7 @@ func NewToolResultError(text string) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
 			},
 		},
@@ -319,8 +368,23 @@ func NewToolResultErrorFromErr(text string, err error) *CallToolResult {
 	return &CallToolResult{
 		Content: []Content{
 			TextContent{
-				Type: "text",
+				Type: ContentTypeText,
 				Text: text,
+			},
+		},
+		IsError: true,
+	}
+}
+
+// NewToolResultErrorf creates a new CallToolResult with an error message.
+// The error message is formatted using the fmt package.
+// Any errors that originate from the tool SHOULD be reported inside the result object.
+func NewToolResultErrorf(format string, a ...any) *CallToolResult {
+	return &CallToolResult{
+		Content: []Content{
+			TextContent{
+				Type: ContentTypeText,
+				Text: fmt.Sprintf(format, a...),
 			},
 		},
 		IsError: true,
@@ -441,11 +505,11 @@ func ParseContent(contentMap map[string]any) (Content, error) {
 	contentType := ExtractString(contentMap, "type")
 
 	switch contentType {
-	case "text":
+	case ContentTypeText:
 		text := ExtractString(contentMap, "text")
 		return NewTextContent(text), nil
 
-	case "image":
+	case ContentTypeImage:
 		data := ExtractString(contentMap, "data")
 		mimeType := ExtractString(contentMap, "mimeType")
 		if data == "" || mimeType == "" {
@@ -453,7 +517,7 @@ func ParseContent(contentMap map[string]any) (Content, error) {
 		}
 		return NewImageContent(data, mimeType), nil
 
-	case "audio":
+	case ContentTypeAudio:
 		data := ExtractString(contentMap, "data")
 		mimeType := ExtractString(contentMap, "mimeType")
 		if data == "" || mimeType == "" {
@@ -461,7 +525,17 @@ func ParseContent(contentMap map[string]any) (Content, error) {
 		}
 		return NewAudioContent(data, mimeType), nil
 
-	case "resource":
+	case ContentTypeLink:
+		uri := ExtractString(contentMap, "uri")
+		name := ExtractString(contentMap, "name")
+		description := ExtractString(contentMap, "description")
+		mimeType := ExtractString(contentMap, "mimeType")
+		if uri == "" || name == "" {
+			return nil, fmt.Errorf("resource_link uri or name is missing")
+		}
+		return NewResourceLink(uri, name, description, mimeType), nil
+
+	case ContentTypeResource:
 		resourceMap := ExtractMap(contentMap, "resource")
 		if resourceMap == nil {
 			return nil, fmt.Errorf("resource is missing")
@@ -493,7 +567,7 @@ func ParseGetPromptResult(rawMessage *json.RawMessage) (*GetPromptResult, error)
 	meta, ok := jsonContent["_meta"]
 	if ok {
 		if metaMap, ok := meta.(map[string]any); ok {
-			result.Meta = metaMap
+			result.Meta = NewMetaFromMap(metaMap)
 		}
 	}
 
@@ -559,7 +633,7 @@ func ParseCallToolResult(rawMessage *json.RawMessage) (*CallToolResult, error) {
 	meta, ok := jsonContent["_meta"]
 	if ok {
 		if metaMap, ok := meta.(map[string]any); ok {
-			result.Meta = metaMap
+			result.Meta = NewMetaFromMap(metaMap)
 		}
 	}
 
@@ -594,6 +668,12 @@ func ParseCallToolResult(rawMessage *json.RawMessage) (*CallToolResult, error) {
 		}
 
 		result.Content = append(result.Content, content)
+	}
+
+	// Handle structured content
+	structuredContent, ok := jsonContent["structuredContent"]
+	if ok {
+		result.StructuredContent = structuredContent
 	}
 
 	return &result, nil
@@ -641,7 +721,7 @@ func ParseReadResourceResult(rawMessage *json.RawMessage) (*ReadResourceResult, 
 	meta, ok := jsonContent["_meta"]
 	if ok {
 		if metaMap, ok := meta.(map[string]any); ok {
-			result.Meta = metaMap
+			result.Meta = NewMetaFromMap(metaMap)
 		}
 	}
 

@@ -883,37 +883,19 @@ func TestSSEServer(t *testing.T) {
 
 	t.Run("TestSSEHandlerWithDynamicMounting", func(t *testing.T) {
 		mcpServer := NewMCPServer("test", "1.0.0")
-		// MessageEndpointFunc that extracts tenant from the path (compatible with Go 1.20+)
-
-		// extractTenantFromPath extracts tenant from path like "/mcp/{tenant}/sse" or "/mcp/{tenant}/message"
-		extractTenantFromPath := func(path string) string {
-			// Expected path format: /mcp/{tenant}/sse or /mcp/{tenant}/message
-			parts := strings.Split(strings.Trim(path, "/"), "/")
-			if len(parts) >= 2 && parts[0] == "mcp" {
-				return parts[1]
-			}
-			return ""
-		}
+		// MessageEndpointFunc that extracts tenant from the path using Go 1.22+ PathValue
 
 		sseServer := NewSSEServer(
 			mcpServer,
 			WithDynamicBasePath(func(r *http.Request, sessionID string) string {
-				tenant := extractTenantFromPath(r.URL.Path)
+				tenant := r.PathValue("tenant")
 				return "/mcp/" + tenant
 			}),
 		)
 
 		mux := http.NewServeMux()
-		// Note: For Go < 1.22, we need to handle path patterns manually
-		mux.HandleFunc("/mcp/", func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "/sse") {
-				sseServer.SSEHandler().ServeHTTP(w, r)
-			} else if strings.HasSuffix(r.URL.Path, "/message") {
-				sseServer.MessageHandler().ServeHTTP(w, r)
-			} else {
-				http.NotFound(w, r)
-			}
-		})
+		mux.Handle("/mcp/{tenant}/sse", sseServer.SSEHandler())
+		mux.Handle("/mcp/{tenant}/message", sseServer.MessageHandler())
 
 		ts := httptest.NewServer(mux)
 		defer ts.Close()
@@ -1275,7 +1257,7 @@ func TestSSEServer(t *testing.T) {
 			WithHooks(&Hooks{
 				OnAfterInitialize: []OnAfterInitializeFunc{
 					func(ctx context.Context, id any, message *mcp.InitializeRequest, result *mcp.InitializeResult) {
-						result.Meta = map[string]any{"invalid": func() {}} // marshal will fail
+						result.Meta = mcp.NewMetaFromMap(map[string]any{"invalid": func() {}}) // marshal will fail
 					},
 				},
 			}),
@@ -1461,6 +1443,169 @@ func TestSSEServer(t *testing.T) {
 			t.Fatal("Shutdown did not return in time (likely deadlocked)")
 		}
 	})
+
+	t.Run("Headers are passed through to tool requests", func(t *testing.T) {
+		hooks := &Hooks{}
+		headerVerified := make(chan struct{})
+		hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+			if message.Params.Name == "verify-headers" {
+				select {
+				case <-headerVerified:
+				default:
+					close(headerVerified)
+				}
+			}
+		})
+
+		mcpServer := NewMCPServer("test", "1.0.0", WithHooks(hooks))
+		addHeaderVerificationTool(mcpServer)
+		testServer := NewTestServer(mcpServer)
+		defer testServer.Close()
+
+		// First establish SSE connection
+		sseResp, err := http.Get(fmt.Sprintf("%s/sse", testServer.URL))
+		if err != nil {
+			t.Fatalf("Failed to connect to SSE endpoint: %v", err)
+		}
+		defer sseResp.Body.Close()
+
+		// Read the endpoint event
+		endpointEvent, err := readSSEEvent(sseResp)
+		if err != nil {
+			t.Fatalf("Failed to read SSE response: %v", err)
+		}
+		messageURL := strings.TrimSpace(
+			strings.Split(strings.Split(endpointEvent, "data: ")[1], "\n")[0],
+		)
+
+		// Send request with custom header
+		toolRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "tools/call",
+			"params": map[string]any{
+				"name": "verify-headers",
+			},
+		}
+		requestBody, err := json.Marshal(toolRequest)
+		if err != nil {
+			t.Fatalf("Failed to marshal request: %v", err)
+		}
+
+		// Create request with custom header
+		messageReq, err := http.NewRequest("POST", messageURL, bytes.NewReader(requestBody))
+		if err != nil {
+			t.Fatalf("Failed to create message request: %v", err)
+		}
+		messageReq.Header.Set("Content-Type", "application/json")
+		messageReq.Header.Set("X-Custom-Header", "test-value")
+
+		resp, err := http.DefaultClient.Do(messageReq)
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusAccepted {
+			t.Errorf("Expected status 202, got %d", resp.StatusCode)
+		}
+
+		// Wait for hook to be called
+		select {
+		case <-headerVerified:
+		case <-time.After(1 * time.Second):
+			t.Error("Header verification hook was not called within timeout")
+		}
+	})
+
+	t.Run("Headers are not nil when no headers are set", func(t *testing.T) {
+		hooks := &Hooks{}
+		headersChecked := make(chan struct{})
+		hooks.AddAfterCallTool(func(ctx context.Context, id any, message *mcp.CallToolRequest, result *mcp.CallToolResult) {
+			if message.Params.Name == "check-headers-not-nil" {
+				select {
+				case <-headersChecked:
+				default:
+					close(headersChecked)
+				}
+			}
+		})
+
+		mcpServer := NewMCPServer("test", "1.0.0", WithHooks(hooks))
+		mcpServer.AddTool(
+			mcp.NewTool("check-headers-not-nil"),
+			func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				// This will panic if headers are nil
+				_ = request.Header.Get("Any-Header")
+				// Also verify we can iterate over headers safely
+				for key := range request.Header {
+					_ = request.Header.Get(key)
+				}
+				return mcp.NewToolResultText("headers not nil"), nil
+			},
+		)
+		testServer := NewTestServer(mcpServer)
+		defer testServer.Close()
+
+		// First establish SSE connection
+		sseResp, err := http.Get(fmt.Sprintf("%s/sse", testServer.URL))
+		if err != nil {
+			t.Fatalf("Failed to connect to SSE endpoint: %v", err)
+		}
+		defer sseResp.Body.Close()
+
+		// Read the endpoint event
+		endpointEvent, err := readSSEEvent(sseResp)
+		if err != nil {
+			t.Fatalf("Failed to read SSE response: %v", err)
+		}
+		messageURL := strings.TrimSpace(
+			strings.Split(strings.Split(endpointEvent, "data: ")[1], "\n")[0],
+		)
+
+		// Send request without any headers at all
+		toolRequest := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "tools/call",
+			"params": map[string]any{
+				"name": "check-headers-not-nil",
+			},
+		}
+		requestBody, err := json.Marshal(toolRequest)
+		if err != nil {
+			t.Fatalf("Failed to marshal request: %v", err)
+		}
+
+		// Use a custom transport to avoid default headers
+		transport := &http.Transport{}
+		client := &http.Client{Transport: transport}
+
+		// Create a completely headerless request
+		req, err := http.NewRequest("POST", messageURL, bytes.NewReader(requestBody))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
+		// Clear all headers to ensure absolutely no headers are sent
+		req.Header = make(http.Header)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Failed to send message: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusAccepted {
+			t.Errorf("Expected status 202, got %d", resp.StatusCode)
+		}
+
+		// Wait for hook to be called
+		select {
+		case <-headersChecked:
+		case <-time.After(1 * time.Second):
+			t.Error("Headers check hook was not called within timeout")
+		}
+	})
 }
 
 func readSSEEvent(sseResp *http.Response) (string, error) {
@@ -1470,4 +1615,17 @@ func readSSEEvent(sseResp *http.Response) (string, error) {
 		return "", err
 	}
 	return string(buf[:n]), nil
+}
+
+// addHeaderVerificationTool adds a tool that verifies HTTP headers are passed correctly
+func addHeaderVerificationTool(mcpServer *MCPServer) {
+	mcpServer.AddTool(
+		mcp.NewTool("verify-headers"),
+		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			if request.Header.Get("X-Custom-Header") != "test-value" {
+				return nil, fmt.Errorf("expected X-Custom-Header to be test-value, got %s", request.Header.Get("X-Custom-Header"))
+			}
+			return mcp.NewToolResultText("headers verified"), nil
+		},
+	)
 }
